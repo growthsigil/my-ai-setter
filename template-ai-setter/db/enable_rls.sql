@@ -1,0 +1,30 @@
+﻿-- Enable Row-Level Security on every app table.
+-- service_role (the server) bypasses RLS and keeps full access;
+-- the public anon key gets denied everything.
+alter table public.ai_decisions          enable row level security;
+alter table public.banned_contacts       enable row level security;
+alter table public.call_outcomes         enable row level security;
+alter table public.call_reminders        enable row level security;
+alter table public.clients               enable row level security;
+alter table public.content_pipeline      enable row level security;
+alter table public.customers             enable row level security;
+alter table public.dashboard_config      enable row level security;
+alter table public.disputes              enable row level security;
+alter table public.dm_intel_reports      enable row level security;
+alter table public.dm_suggestions        enable row level security;
+alter table public.events                enable row level security;
+alter table public.follow_up_log         enable row level security;
+alter table public.follower_counts       enable row level security;
+alter table public.leads                 enable row level security;
+alter table public.messages              enable row level security;
+alter table public.notes                 enable row level security;
+alter table public.nurture_jobs          enable row level security;
+alter table public.payments              enable row level security;
+alter table public.pipeline_stages       enable row level security;
+alter table public.prompter_config       enable row level security;
+alter table public.scheduled_payments    enable row level security;
+alter table public.setter_brain_versions enable row level security;
+alter table public.team_activity         enable row level security;
+alter table public.team_members          enable row level security;
+alter table public.webhook_debug_logs    enable row level security;
+alter table public.yt_scripts            enable row level security;
