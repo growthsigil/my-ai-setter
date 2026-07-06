@@ -174,5 +174,7 @@ on conflict (slug) do update set
   voice_samples    = excluded.voice_samples,
   stages           = excluded.stages,
   pain_protocol    = excluded.pain_protocol,
-  is_active        = true,
+  -- NOTE: is_active is deliberately NOT updated on conflict, so re-running this
+  -- to tweak the skin never flips a paused/live client. Set it explicitly with
+  -- a separate UPDATE when you're ready to go live.
   updated_at       = now();
