@@ -1409,12 +1409,29 @@ function HudStatus({ online, asleep, ringRef }: { online: boolean; asleep: boole
   );
 }
 
+// The demo can showcase multiple niches. `owner` = the real setter (default,
+// unchanged); the others load a seeded demo skin (see /api/hq/demo-dm). Flip
+// between them live with a word command typed into the panel.
+type DemoNiche = "owner" | "fitness" | "beauty";
+const NICHE_LABEL: Record<DemoNiche, string> = { owner: "AI SETTER", fitness: "FITNESS", beauty: "CLEAN BEAUTY" };
+
+/** Map a bare word command to a niche, or null if it isn't a switch command. */
+function detectNicheSwitch(text: string): DemoNiche | null {
+  const s = text.toLowerCase().replace(/^\/+/, "").replace(/^switch to /, "").trim();
+  if (/^(fitness|fit|gym|coach(ing)?)( demo)?$/.test(s)) return "fitness";
+  if (/^(beauty|clean beauty|skincare|skin|glow|esthetician)( demo)?$/.test(s)) return "beauty";
+  if (/^(owner|real|default|reset|teu)( demo)?$/.test(s)) return "owner";
+  return null;
+}
+
 /** LIVE DEMO SETTER — a draggable IG-style chat. Maher (or a prospect) types
- *  as the lead; the real AI setter persona replies. Pure showcase. */
+ *  as the lead; the real AI setter persona replies. Pure showcase. Type a niche
+ *  word ("fitness" / "beauty") to switch which funnel the demo shows. */
 function DemoDM({ accessKey, onClose, onTick }: { accessKey: string; onClose: () => void; onTick?: () => void }) {
-  const [msgs, setMsgs] = useState<{ role: "lead" | "setter"; text: string }[]>([]);
+  const [msgs, setMsgs] = useState<{ role: "lead" | "setter" | "sys"; text: string }[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [niche, setNiche] = useState<DemoNiche>("owner");
   const [pos, setPos] = useState({ x: 34, y: 15 });
   const drag = useRef<{ dx: number; dy: number } | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -1431,18 +1448,39 @@ function DemoDM({ accessKey, onClose, onTick }: { accessKey: string; onClose: ()
   };
   const onUp = (e: React.PointerEvent) => { drag.current = null; try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* */ } };
 
+  // Stream the setter's reply bubbles in one at a time, at a human pace.
+  const streamBubbles = async (bubbles: string[]) => {
+    for (let i = 0; i < bubbles.length; i++) {
+      await new Promise((r) => setTimeout(r, i ? 950 : 350));
+      setMsgs((m) => [...m, { role: "setter", text: bubbles[i] }]); onTick?.();
+    }
+  };
+
+  // A bare word command flips the demo to another niche: clear the thread and
+  // pull that niche's own opener, so you can switch funnels live in a pitch.
+  const switchNiche = async (target: DemoNiche) => {
+    setNiche(target); setInput(""); setBusy(true); onTick?.();
+    setMsgs([{ role: "sys", text: `— switched to ${NICHE_LABEL[target]} demo —` }]);
+    try {
+      const res = await fetch(`/api/hq/demo-dm?k=${encodeURIComponent(accessKey)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ history: [], niche: target }) });
+      const data = (await res.json()) as { messages?: string[] };
+      await streamBubbles((data.messages ?? []).filter(Boolean));
+    } catch { /* keep the switch notice even if the opener fetch fails */ }
+    setBusy(false);
+  };
+
   const send = async () => {
     const text = input.trim(); if (!text || busy) return;
+    // Word command? Switch niche instead of sending it as a lead message.
+    const target = detectNicheSwitch(text);
+    if (target) { setInput(""); if (target !== niche) switchNiche(target); return; }
     const next = [...msgs, { role: "lead" as const, text }];
     setMsgs(next); setInput(""); setBusy(true); onTick?.();
     try {
-      const res = await fetch(`/api/hq/demo-dm?k=${encodeURIComponent(accessKey)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ history: next.map((m) => ({ role: m.role, content: m.text })) }) });
+      const history = next.filter((m) => m.role !== "sys").map((m) => ({ role: m.role, content: m.text }));
+      const res = await fetch(`/api/hq/demo-dm?k=${encodeURIComponent(accessKey)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ history, niche }) });
       const data = (await res.json()) as { messages?: string[] };
-      const bubbles = (data.messages ?? []).filter(Boolean);
-      for (let i = 0; i < bubbles.length; i++) {
-        await new Promise((r) => setTimeout(r, i ? 950 : 350));
-        setMsgs((m) => [...m, { role: "setter", text: bubbles[i] }]); onTick?.();
-      }
+      await streamBubbles((data.messages ?? []).filter(Boolean));
     } catch { setMsgs((m) => [...m, { role: "setter", text: "one sec — say that again?" }]); }
     setBusy(false);
   };
@@ -1450,16 +1488,20 @@ function DemoDM({ accessKey, onClose, onTick }: { accessKey: string; onClose: ()
   return (
     <div className="hq-panel hq-dm" style={{ left: `${pos.x}%`, top: `${pos.y}%` }}>
       <div className="hq-panel-bar" onPointerDown={onDown} onPointerMove={onMoveP} onPointerUp={onUp} onPointerCancel={onUp}>
-        <span className="hq-panel-title">● LIVE · AI SETTER DEMO</span>
+        <span className="hq-panel-title">● LIVE · {NICHE_LABEL[niche]} DEMO</span>
         <button className="hq-panel-x" onPointerDown={(e) => e.stopPropagation()} onClick={onClose}>✕</button>
       </div>
       <div className="hq-dm-body" ref={bodyRef}>
-        {msgs.length === 0 && <div className="hq-dm-hint">Type as the lead — watch the setter close.</div>}
-        {msgs.map((m, i) => (<div key={i} className={`hq-bub ${m.role === "lead" ? "us" : "lead"}`}>{m.text}</div>))}
+        {msgs.length === 0 && <div className="hq-dm-hint">Type as the lead — or say “fitness” / “beauty” to switch demo.</div>}
+        {msgs.map((m, i) => (
+          m.role === "sys"
+            ? <div key={i} className="hq-dm-hint">{m.text}</div>
+            : <div key={i} className={`hq-bub ${m.role === "lead" ? "us" : "lead"}`}>{m.text}</div>
+        ))}
         {busy && <div className="hq-bub lead hq-dm-typing">typing…</div>}
       </div>
       <form className="hq-dm-input" onSubmit={(e) => { e.preventDefault(); send(); }}>
-        <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="type as the lead…" autoFocus />
+        <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="type as the lead… (or “fitness” / “beauty”)" autoFocus />
         <button type="submit" className="hq-dm-send" disabled={busy}>Send</button>
       </form>
     </div>
