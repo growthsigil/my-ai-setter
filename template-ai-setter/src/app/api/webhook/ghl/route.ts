@@ -1203,8 +1203,8 @@ async function runReplyGeneration(params: {
         ];
 
   // --- Phase 2: tag any booking/calendar link the AI is about to send with
-  //     utm_medium=ai_dm. We save + send the SAME tagged text so the DB record
-  //     and the lead's DM match. ---
+  //     utm_medium=dm1. We save + send the SAME tagged text so the DB
+  //     record and the lead's DM match. ---
   // --- Build the outbound plan. Each capped segment goes out as TEXT, or — when
   //     the brain marked it [[VOICE]] AND voice is live + the line is eligible
   //     (no links/times, right length) — as a VOICE NOTE (audio only) in the

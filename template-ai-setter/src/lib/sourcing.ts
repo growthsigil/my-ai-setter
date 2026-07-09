@@ -4,7 +4,9 @@
  * Phase 1: derive a lead's first-touch source from the opt-in form's hidden
  *          UTM fields and/or the contact's FIRST attributionSource.
  * Phase 2: detect the AI's calendar/booking links in an outgoing DM and tag
- *          them with utm_medium=ai_dm.
+ *          them with utm_medium=dm1. (Kept distinct from the internal
+ *          booking_method="ai_dm" value below — this one lands in a URL the
+ *          lead can see, so it must never spell out "ai".)
  * Phase 3: resolve booking_method (last touch) when a lead becomes booked.
  *
  * Every UTM value we store is lowercased.
@@ -146,11 +148,11 @@ export function isBookingUrl(url: string): boolean {
   return BOOKING_URL_HINTS.some((re) => re.test(url));
 }
 
-/** Add/override utm_medium=ai_dm on a single URL. Returns the URL unchanged on parse failure. */
+/** Add/override utm_medium=dm1 on a single URL. Returns the URL unchanged on parse failure. */
 function withAiDmMedium(url: string): string {
   try {
     const u = new URL(url);
-    u.searchParams.set("utm_medium", "ai_dm");
+    u.searchParams.set("utm_medium", "dm1");
     return u.toString();
   } catch {
     return url;
@@ -158,7 +160,7 @@ function withAiDmMedium(url: string): string {
 }
 
 /**
- * Tag every booking/calendar link in an outgoing message with utm_medium=ai_dm.
+ * Tag every booking/calendar link in an outgoing message with utm_medium=dm1.
  * Returns the rewritten text and whether any booking link was present.
  */
 export function tagBookingLinks(text: string): { text: string; hadBookingLink: boolean } {
