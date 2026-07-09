@@ -1132,7 +1132,7 @@ async function runReplyGeneration(params: {
     console.log("[webhook] generated reply repeats a recent message — regenerating once");
     try {
       const antiRepeatInstruction =
-        "You have ALREADY sent your most recent 'assistant' messages above. Do NOT repeat them, reword them, or re-ask a question you have already asked. The lead has seen them. Move the conversation FORWARD to the next step of the process instead.";
+        "You have ALREADY sent your most recent 'assistant' messages above. Do NOT repeat them, reword them, or re-ask a question you have already asked. The lead has seen them. Acknowledge what they just said in a fresh way and keep working toward the CURRENT step's goal below. Do NOT jump ahead to a later step or bring in anything from a step beyond the one you've been given, even to avoid repeating yourself — staying on the current step is more important than avoiding a similar-sounding line.";
       const retry = await generateReply({
         client: genClient,
         history,
