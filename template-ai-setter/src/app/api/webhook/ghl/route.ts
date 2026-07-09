@@ -419,6 +419,16 @@ export async function POST(req: NextRequest) {
   const locationId = body.location?.id || body.customData?.locationId;
   // Always use message.body. NEVER read from a "Last Inbound Message" field.
   const messageText = body.message?.body;
+  // Some non-text IG shares (stickers/reactions/attachments) arrive with
+  // body.body set to a lone placeholder glyph — e.g. U+FFFC OBJECT
+  // REPLACEMENT CHARACTER — rather than a genuinely empty string. .trim()
+  // alone doesn't catch these (they're non-whitespace), so a placeholder-only
+  // "message" was slipping through as real lead text and getting a full AI
+  // reply generated against it — racing ahead of the lead's actual next
+  // message and producing a visible non-sequitur re-ask.
+  const NON_TEXT_PLACEHOLDER_RE = /[\uFFFC\uFFFD\u200B\u200C\u200D\uFEFF]/g;
+  const hasRealText = (s: string | undefined | null): boolean =>
+    !!s && !!s.replace(NON_TEXT_PLACEHOLDER_RE, "").trim();
   const igSenderId =
     body.contact?.attributionSource?.igSid ||
     body.contact?.lastAttributionSource?.igSid;
@@ -526,7 +536,7 @@ export async function POST(req: NextRequest) {
   // describe images (Claude vision). The result is stored and flows through the
   // pipeline as if the lead had typed it. Text messages skip this entirely.
   let effectiveText = messageText;
-  if (!effectiveText || !effectiveText.trim()) {
+  if (!hasRealText(effectiveText)) {
     try {
       const resolved = await resolveIncomingMedia({
         apiKey: client.ghl_api_key,
@@ -544,7 +554,7 @@ export async function POST(req: NextRequest) {
 
   // Still nothing usable (reaction, story reply, share, video, or fetch
   // failed) — return 200 so GHL doesn't retry, and never call the AI.
-  if (!effectiveText || !effectiveText.trim()) {
+  if (!hasRealText(effectiveText)) {
     console.log("[webhook] No usable content (non-text IG event) — skipping, no AI.");
     return NextResponse.json({ ok: true, skipped: "no_message_body" });
   }
