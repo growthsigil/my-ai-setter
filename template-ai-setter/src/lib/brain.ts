@@ -89,9 +89,22 @@ export async function generateReply(
     throw new Error("Cannot generate reply: last message is not from the lead.");
   }
 
-  const response = await anthropic.messages.create({
+  // Adaptive thinking: the model puts its private reasoning in separate
+  // `thinking` content blocks instead of the visible reply. We only surface
+  // `type === "text"` blocks below (see rawResponse), so its deliberation can
+  // never be sent to the lead as a DM. Before this, the model had no thinking
+  // channel and, faced with the dense stage/rule prompt, leaked its whole
+  // chain-of-thought straight into the message bubbles. `effort: "low"` keeps
+  // the added latency small for a real-time chat.
+  //
+  // `thinking`/`output_config` are valid request fields for claude-sonnet-4-6
+  // but post-date this project's pinned @anthropic-ai/sdk types, so the body is
+  // cast before the call — the SDK serializes unknown fields straight through.
+  const requestBody = {
     model: PRODUCTION_MODEL,
-    max_tokens: 1024,
+    max_tokens: 2048, // room for thinking tokens + the short reply (both count here)
+    thinking: { type: "adaptive" },
+    output_config: { effort: "low" },
     // Prompt caching: the stable block (engine directives + client rules/voice/
     // context/process) is byte-identical for every lead of this client, so it
     // carries the cache breakpoint. Within the 5-min cache window, repeat
@@ -102,7 +115,10 @@ export async function generateReply(
       { type: "text", text: volatile },
     ],
     messages,
-  });
+  };
+  const response = (await anthropic.messages.create(
+    requestBody as unknown as Parameters<typeof anthropic.messages.create>[0]
+  )) as Anthropic.Message;
 
   const cacheWrite = response.usage.cache_creation_input_tokens ?? 0;
   const cacheRead = response.usage.cache_read_input_tokens ?? 0;
