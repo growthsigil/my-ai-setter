@@ -214,6 +214,10 @@ function Hq() {
   const [fxLabel, setFxLabel] = useState("");
   const [fxMode, setFxMode] = useState<FxMode>("");
   const [srSupported, setSrSupported] = useState(true);
+  // Top-bar workspace switcher: the client roster + the active slug ("all" =
+  // combined view). Selecting one re-scopes the dashboard iframe via ?client=.
+  const [clients, setClients] = useState<{ slug: string; label: string }[]>([]);
+  const [client, setClient] = useState("all");
 
   const orbRef = useRef<OrbState>("idle"); orbRef.current = orb;
   const fxModeRef = useRef<FxMode>(""); fxModeRef.current = fxMode;
@@ -284,6 +288,13 @@ function Hq() {
   useEffect(() => {
     const k = KEY(); keyRef.current = k; setSrSupported(getSR() !== null);
     if (isDemo()) { demoRef.current = true; setDemo(true); ringRef.current = { leads7: 47, engaged: 13, booked7: 11, cash7: "$18.4K" }; }
+    // Pull the client roster for the top-bar workspace switcher (key-gated).
+    if (k) {
+      fetch(`/api/hq/clients?k=${encodeURIComponent(k)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((j) => { if (j?.clients?.length) setClients(j.clients); })
+        .catch(() => {});
+    }
   }, []);
 
   // ── room depth: the whole HQ leans with the mouse (parallax) ──
@@ -1305,6 +1316,11 @@ gl_FragColor=vec4(col,a);}`;
   };
   const asleep = orb === "asleep";
   const dcAmount = dealClose ? "$" + Math.round(dealClose.amount).toLocaleString("en-US") : "";
+  // Dashboard iframe URL, scoped to the chosen workspace (page.tsx reads ?client=).
+  const dashQs = new URLSearchParams();
+  if (demo) dashQs.set("demo", "1");
+  if (client && client !== "all") dashQs.set("client", client);
+  const dashSrc = `/dashboard${dashQs.toString() ? `?${dashQs.toString()}` : ""}`;
 
   return (
     <div className={`hq-root tab-${tab} ${asleep ? "asleep" : ""} ${!online ? "off" : ""} ${cinema ? "cinema" : ""}`} onPointerDown={fxMode === "boot" ? skipBoot : undefined}>
@@ -1333,6 +1349,21 @@ gl_FragColor=vec4(col,a);}`;
           <button className={`hq-tab ${tab === "jarvis" ? "on" : ""}`} onMouseEnter={() => sfx("tick")} onClick={() => setTab("jarvis")}>JARVIS</button>
           <button className={`hq-tab ${tab === "dashboard" ? "on" : ""}`} onMouseEnter={() => sfx("tick")} onClick={() => setTab("dashboard")}>{BRAND_NAME}</button>
         </nav>
+        {clients.length > 0 && (
+          <label className="hq-wsel" title="Switch which client's dashboard you're viewing">
+            <span className="hq-wsel-cap">WORKSPACE</span>
+            <select
+              value={client}
+              onChange={(e) => { sfx("tick"); setClient(e.target.value); setTab("dashboard"); }}
+              aria-label="Client workspace"
+            >
+              <option value="all">All clients</option>
+              {clients.map((c) => (
+                <option key={c.slug} value={c.slug}>{c.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
         <span className={`hq-state s-${orb}`}>{online ? `● ${orb}` : "○ offline"}</span>
       </header>
 
@@ -1360,7 +1391,7 @@ gl_FragColor=vec4(col,a);}`;
         </div>
       )}
 
-      {tab === "dashboard" && <div className="hq-frame"><iframe src={demo ? "/dashboard?demo=1" : "/dashboard"} title={`${BRAND_NAME} Dashboard`} className="hq-iframe" /></div>}
+      {tab === "dashboard" && <div className="hq-frame"><iframe src={dashSrc} title={`${BRAND_NAME} Dashboard`} className="hq-iframe" /></div>}
     </div>
   );
 }
@@ -1618,6 +1649,12 @@ function HqStyles() {
       .hq-tab:hover { border-color: rgba(201,168,76,0.7); color: #f5f0e1; box-shadow: 0 0 18px rgba(201,168,76,0.25), inset 0 0 12px rgba(201,168,76,0.08); transform: translateY(-1px); }
       .hq-tab:hover::after { left: 120%; }
       .hq-tab.on { color: #0a0e1a; background: linear-gradient(90deg,#c9a84c,#8b6914); border-color: transparent; font-weight: 800; box-shadow: 0 0 22px rgba(201,168,76,0.35); }
+      .hq-wsel { display: inline-flex; align-items: center; gap: 8px; }
+      .hq-wsel-cap { font-size: 9.5px; letter-spacing: 0.18em; color: #7d869c; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .hq-wsel select { background: rgba(201,168,76,0.06); border: 1px solid rgba(201,168,76,0.28); color: #f5f0e1; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; padding: 8px 12px; border-radius: 999px; cursor: pointer; backdrop-filter: blur(10px); transition: .25s; max-width: 180px; }
+      .hq-wsel select:hover { border-color: rgba(201,168,76,0.7); box-shadow: 0 0 18px rgba(201,168,76,0.22); }
+      .hq-wsel select:focus { outline: none; border-color: rgba(201,168,76,0.8); }
+      .hq-wsel option { background: #0a0e1a; color: #f5f0e1; }
       .hq-state { font-size: 11px; letter-spacing: 0.1em; color: #8b6914; text-transform: uppercase; min-width: 92px; text-align: right; }
       .hq-state.s-listening { color: #f0e1aa; } .hq-state.s-thinking { color: #8ab0ff; } .hq-state.s-speaking { color: #c9a84c; } .hq-state.s-asleep { color: #5a5646; }
       .hq-stage { position: absolute; inset: 64px 0 0 0; z-index: 3; display: flex; flex-direction: column; align-items: center; justify-content: center;
