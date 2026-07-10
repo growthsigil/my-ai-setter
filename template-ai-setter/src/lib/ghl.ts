@@ -578,6 +578,70 @@ export async function getLatestInboundAttachment(
   }
 }
 
+/**
+ * Return the NEWEST inbound message's TEXT body for a contact, or null.
+ *
+ * Why this exists: IG bursts (a photo sent together with a keyword like
+ * "MACROS") can make GHL fire the inbound workflow on the empty-body MEDIA
+ * event, so the lead's real text never reaches our webhook payload and the DM
+ * gets dropped. When the payload body is empty we call this to recover that
+ * text straight from the conversation.
+ *
+ * It inspects only the SINGLE newest inbound message and returns its body when
+ * non-empty. That's deliberate: if the newest inbound is genuinely media (a
+ * photo/voice note with no caption) it returns null so the caller falls through
+ * to media resolution, and it can never resurface an older, already-handled
+ * text message. Returns null on any API error too (caller then tries media).
+ */
+export async function getLatestInboundText(
+  apiKey: string,
+  locationId: string,
+  contactId: string
+): Promise<string | null> {
+  try {
+    const searchUrl =
+      `${GHL_API_BASE}/conversations/search` +
+      `?locationId=${encodeURIComponent(locationId)}` +
+      `&contactId=${encodeURIComponent(contactId)}`;
+    const sres = await fetch(searchUrl, { headers: ghlHeaders(apiKey) });
+    if (!sres.ok) {
+      console.error("[ghl] conversation search failed:", sres.status, await sres.text());
+      return null;
+    }
+    const sdata = await sres.json();
+    const convId = sdata?.conversations?.[0]?.id;
+    if (!convId) return null;
+
+    const mUrl = `${GHL_API_BASE}/conversations/${convId}/messages?limit=20`;
+    const mres = await fetch(mUrl, { headers: ghlHeaders(apiKey) });
+    if (!mres.ok) {
+      console.error("[ghl] get messages failed:", mres.status, await mres.text());
+      return null;
+    }
+    const mdata = await mres.json();
+    const list: Array<Record<string, unknown>> =
+      mdata?.messages?.messages ?? mdata?.messages ?? [];
+
+    // Newest first, then take the first inbound message and use its text.
+    list.sort((a, b) => {
+      const da = new Date((a.dateAdded as string) || 0).getTime();
+      const db = new Date((b.dateAdded as string) || 0).getTime();
+      return db - da;
+    });
+    const newestInbound = list.find(
+      (m) => String(m.direction || "").toLowerCase() === "inbound"
+    );
+    if (!newestInbound) return null;
+    const text = (
+      ((newestInbound.body as string) || (newestInbound.message as string) || "")
+    ).trim();
+    return text || null;
+  } catch (err) {
+    console.error("[ghl] getLatestInboundText threw:", err);
+    return null;
+  }
+}
+
 // ===========================================================================
 // OPPORTUNITIES (used by Jarvis HQ voice actions — "move him in the pipeline")
 // ---------------------------------------------------------------------------
