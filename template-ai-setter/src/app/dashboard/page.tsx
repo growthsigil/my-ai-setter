@@ -1,12 +1,14 @@
 import { supabase } from "@/lib/supabase";
 import Filters from "./filters";
 import SalesFunnelSelect from "./sales-funnel-select";
+import ClientSwitcher from "./client-switcher";
 import MoneyFlow from "./money-flow";
+import { OWNER_SLUG } from "@/lib/owner";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// ── get_dashboard(p_start, p_end, p_source, p_funnel) jsonb shape ──
+// ── get_dashboard(p_start, p_end, p_source, p_funnel, p_client_id) jsonb shape ──
 type Reason = { reason: string; name: string | null; date: string | null };
 type Dashboard = {
   period: { start: string; end: string; source: string; funnel: string };
@@ -50,6 +52,11 @@ type Dashboard = {
     median_days_lead_to_booked: number | null; median_booked_to_call_days: number | null;
     median_sales_cycle_days: number | null;
   };
+  // Folded into get_dashboard so every card is a single client-scoped call.
+  followups: { sent_total: number; sent_7d: number; sent_30d: number; revived_total: number; revived_7d: number; rebooked_total: number };
+  leak: { funnel_stage: string; stalled: number }[];
+  ai_cash: number | null;
+  ai_signed: number | null;
 };
 
 const GOLD = "#a8892e";
@@ -226,13 +233,17 @@ function fakeDashboard(start: string, end: string, source: string, funnel: strin
       median_first_reply_seconds: R(8, 45), leads_gone_quiet: R(10, 40),
       median_days_lead_to_booked: R(1, 4), median_booked_to_call_days: R(1, 3), median_sales_cycle_days: R(3, 9),
     },
+    followups: { sent_total: 121, sent_7d: 34, sent_30d: 121, revived_total: 31, revived_7d: 9, rebooked_total: 7 },
+    leak: [{ funnel_stage: "struggle", stalled: 11 }, { funnel_stage: "pitch_help", stalled: 7 }, { funnel_stage: "dream_outcome", stalled: 5 }, { funnel_stage: "send_calendar", stalled: 3 }],
+    ai_cash: aiBooked * 1650,
+    ai_signed: aiBooked * 3200,
   };
 }
 
 export default async function DashboardPage({
   searchParams,
 }: {
-  searchParams: Promise<{ period?: string; source?: string; start?: string; end?: string; funnel?: string; demo?: string }>;
+  searchParams: Promise<{ period?: string; source?: string; start?: string; end?: string; funnel?: string; demo?: string; client?: string }>;
 }) {
   const sp = await searchParams;
   const period = ["today", "week", "month", "year", "all", "custom"].includes(sp.period || "")
@@ -246,48 +257,37 @@ export default async function DashboardPage({
   // zero real data — safe to show on a sales call.
   const demoView = sp.demo === "1" || sp.demo === "true";
 
-  // The period's data (4th arg = the Sales block's funnel filter).
+  // ── Client workspace switcher ──
+  // Resolve the active client from the dropdown's `?client=<slug>`. Empty or
+  // "all" => combined, all-clients view (p_client_id null, current behaviour).
+  const clientSlug = (sp.client || "").trim();
+  const { data: clientRows } = await supabase.from("clients").select("id, name, slug").order("name");
+  const clients = (clientRows ?? []) as { id: string; name: string | null; slug: string }[];
+  const activeClient = clientSlug && clientSlug !== "all" ? clients.find((c) => c.slug === clientSlug) : undefined;
+  const activeClientId = activeClient?.id ?? null;
+  const activeSlug = activeClient ? activeClient.slug : "all";
+  // Dropdown options: the operator's own workspace shows as "My Dashboard";
+  // real clients show their brand name (falling back to slug).
+  const clientOptions = clients.map((c) => ({
+    slug: c.slug,
+    label: c.slug === OWNER_SLUG ? "My Dashboard" : (c.name || c.slug),
+  }));
+
+  // The period's data, scoped to the active client (p_client_id null => all clients).
   const { data, error } = demoView
     ? { data: fakeDashboard(start, end, source, funnel) as Dashboard, error: null }
     : await supabase.rpc("get_dashboard", {
-      p_start: start, p_end: end, p_source: source || null, p_funnel: funnel,
+      p_start: start, p_end: end, p_source: source || null, p_funnel: funnel, p_client_id: activeClientId,
     });
 
-  // Jarvis-booked money — deals whose booking came from the AI setter (all time).
-  let aiCash = 0, aiSigned = 0;
-  if (demoView) {
-    aiCash = 41200; aiSigned = 78500;
-  } else {
-    const { data: aiDeals } = await supabase.from("customers").select("id, contract_value").eq("booking_method", "ai_dm");
-    const aiIds = (aiDeals ?? []).map((c) => c.id);
-    if (aiIds.length) {
-      const { data: aiPays } = await supabase.from("payments").select("amount").in("customer_id", aiIds);
-      aiCash = (aiPays ?? []).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
-    }
-    aiSigned = (aiDeals ?? []).reduce((sum, c) => sum + (Number(c.contract_value) || 0), 0);
-  }
-
-  // Follow-up engine performance + the leak map (where leads stall in the DMs).
-  const FUNNEL_SEQ = ["opener", "transition_main_reason", "goals", "current_situation", "timeline", "problem", "pitch_help", "book"];
+  // Stage order + labels for the leak map (where leads stall in the DMs).
+  const FUNNEL_SEQ = ["opener", "dream_outcome", "current_situation", "timeframes", "struggle", "qualify_fit", "admit_defeat", "pitch_help", "pitch_call", "pitch_calendar", "send_calendar", "book"];
   const STAGE_LABELS: Record<string, string> = {
-    opener: "Opener", transition_main_reason: "Main reason", goals: "Goals", current_situation: "Situation",
-    timeline: "Timeline", problem: "Problem", pitch_help: "Pitch", book: "Booking", post_book: "Post-book", proof: "Proof", nurture: "Nurture",
+    opener: "Opener", dream_outcome: "Dream outcome", current_situation: "Situation", timeframes: "Timeframes",
+    struggle: "Struggle", qualify_fit: "Qualify", admit_defeat: "Admit help", pitch_help: "Pitch help",
+    pitch_call: "Pitch call", pitch_calendar: "Pitch calendar", send_calendar: "Send calendar",
+    book: "Booking", post_book: "Post-book", proof: "Proof", nurture: "Nurture",
   };
-  let fu = { sent_7d: 0, sent_30d: 0, sent_total: 0, revived_7d: 0, revived_total: 0, rebooked_total: 0 };
-  let leak: { funnel_stage: string; stalled: number }[] = [];
-  if (demoView) {
-    fu = { sent_7d: 34, sent_30d: 121, sent_total: 121, revived_7d: 9, revived_total: 31, rebooked_total: 7 };
-    leak = [{ funnel_stage: "problem", stalled: 11 }, { funnel_stage: "pitch_help", stalled: 7 }, { funnel_stage: "goals", stalled: 5 }, { funnel_stage: "book", stalled: 3 }];
-  } else {
-    const [fuRow, leakRows] = await Promise.all([
-      supabase.from("reporting_followups").select("*").maybeSingle(),
-      supabase.from("reporting_leak_map").select("*"),
-    ]);
-    if (fuRow.data) fu = fuRow.data as typeof fu;
-    leak = (leakRows.data ?? []) as { funnel_stage: string; stalled: number }[];
-  }
-  leak = leak.sort((a, b) => FUNNEL_SEQ.indexOf(a.funnel_stage) - FUNNEL_SEQ.indexOf(b.funnel_stage));
-  const leakMax = Math.max(1, ...leak.map((l) => l.stalled));
 
   // Fixed source list (always shown, even at zero leads). "All sources" is the
   // dropdown's built-in default; a selection passes through as p_source as-is.
@@ -311,6 +311,13 @@ export default async function DashboardPage({
   const ob = d.outbound;
   const ib = d.inbound;
   const s = d.sales;
+  // Follow-ups, leak map and Jarvis-booked money now come scoped in the same
+  // client-scoped RPC payload (no separate global queries).
+  const fu = d.followups ?? { sent_total: 0, sent_7d: 0, sent_30d: 0, revived_total: 0, revived_7d: 0, rebooked_total: 0 };
+  const leak = [...(d.leak ?? [])].sort((a, b) => FUNNEL_SEQ.indexOf(a.funnel_stage) - FUNNEL_SEQ.indexOf(b.funnel_stage));
+  const leakMax = Math.max(1, ...leak.map((l) => l.stalled));
+  const aiCash = d.ai_cash ?? 0;
+  const aiSigned = d.ai_signed ?? 0;
   // Derived call-quality gaps (the "didn't happen" side of each step).
   const notPitched = s.showed != null && s.offer_pitched != null ? s.showed - s.offer_pitched : null;
   const notClosed = s.offer_pitched != null && s.closed != null ? s.offer_pitched - s.closed : null;
@@ -344,11 +351,14 @@ export default async function DashboardPage({
       <div style={{ position: "relative", zIndex: 1, maxWidth: 1260, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
         {/* HEADER */}
         <header style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
-            <span className="hud-brand">{process.env.NEXT_PUBLIC_BRAND_NAME || "AI SETTER"}</span>
-            <span style={{ fontSize: 13, color: MUTED, fontFamily: "var(--mono)" }}>
-              {d.period.start} → {d.period.end} · {d.period.source}
-            </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+              <span className="hud-brand">{process.env.NEXT_PUBLIC_BRAND_NAME || "AI SETTER"}</span>
+              <span style={{ fontSize: 13, color: MUTED, fontFamily: "var(--mono)" }}>
+                {d.period.start} → {d.period.end} · {d.period.source}
+              </span>
+            </div>
+            <ClientSwitcher clients={clientOptions} active={activeSlug} />
           </div>
           <Filters period={period} source={source} sources={sourceOptions} start={start} end={end} />
         </header>

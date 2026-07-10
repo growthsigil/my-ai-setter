@@ -698,7 +698,8 @@ create or replace view public.reporting_calls as
     co.call_duration_minutes,
     co.customer_id,
     l.full_name,
-    COALESCE(NULLIF(l.source_enriched, ''::text), l.source) AS effective_source
+    COALESCE(NULLIF(l.source_enriched, ''::text), l.source) AS effective_source,
+    co.client_id
    FROM call_outcomes co
      LEFT JOIN leads l ON l.id = co.lead_id;
 
@@ -795,7 +796,7 @@ create or replace view public.reporting_leads as
           WHERE events.event_type = ANY (ARRAY['screen_skip_owner'::text, 'screen_skip_friend'::text, 'handoff_biz_owner'::text])
         ), test_flags AS (
          SELECT l_1.id,
-            l_1.full_name ~~* '%test%'::text OR l_1.full_name ~~* '%demo%'::text OR l_1.full_name ~~* 'qa-%'::text OR COALESCE(NULLIF(l_1.source_enriched, ''::text), l_1.source) ~~* 'qa-%'::text OR COALESCE(NULLIF(l_1.source_enriched, ''::text), l_1.source) = 'aima'::text AS is_test
+            COALESCE(l_1.full_name ~~* '%test%'::text OR l_1.full_name ~~* '%demo%'::text OR l_1.full_name ~~* 'qa-%'::text OR COALESCE(NULLIF(l_1.source_enriched, ''::text), l_1.source) ~~* 'qa-%'::text OR COALESCE(NULLIF(l_1.source_enriched, ''::text), l_1.source) = 'aima'::text, false) AS is_test
            FROM leads l_1
         )
  SELECT l.id,
@@ -919,7 +920,8 @@ create or replace view public.reporting_funnel as
     i.lead_id IS NOT NULL AS is_icp,
     q.lead_id IS NOT NULL AS is_qualified,
     COALESCE(fu.cnt, 0::bigint) AS followups,
-    round(COALESCE(ash.share, 0::numeric) * 100::numeric) AS ai_share_pct
+    round(COALESCE(ash.share, 0::numeric) * 100::numeric) AS ai_share_pct,
+    rl.client_id
    FROM reporting_leads rl
      JOIN leads l ON l.id = rl.id
      LEFT JOIN fu ON fu.lead_id = rl.id
@@ -1007,16 +1009,24 @@ begin
 end;
 $function$;
 
-CREATE OR REPLACE FUNCTION public.get_dashboard(p_start date DEFAULT '2000-01-01'::date, p_end date DEFAULT '2999-12-31'::date, p_source text DEFAULT NULL::text, p_funnel text DEFAULT 'all'::text)
- RETURNS jsonb
- LANGUAGE sql
- STABLE
- SET search_path TO 'public', 'pg_catalog'
+-- Client-scoped dashboard aggregate. p_client_id NULL = all clients (combined).
+-- Drop the legacy 4-arg signature first so the 5-arg version is unambiguous.
+drop function if exists public.get_dashboard(date, date, text, text);
+
+CREATE OR REPLACE FUNCTION public.get_dashboard(
+  p_start date DEFAULT '2000-01-01'::date,
+  p_end date DEFAULT '2999-12-31'::date,
+  p_source text DEFAULT NULL::text,
+  p_funnel text DEFAULT 'all'::text,
+  p_client_id uuid DEFAULT NULL::uuid
+)
+ RETURNS jsonb LANGUAGE sql STABLE SET search_path TO 'public', 'pg_catalog'
 AS $function$
   with rfc as (
     select * from reporting_funnel
     where lead_date::date between p_start and p_end
       and (p_source is null or channel = p_source)
+      and (p_client_id is null or client_id = p_client_id)
   ),
   ta as (
     select coalesce(sum(outreaches),0) as outreaches, coalesce(sum(dials),0) as dials,
@@ -1024,6 +1034,7 @@ AS $function$
       coalesce(sum(followups_dials),0) as followups_dials,
       coalesce(sum(pickups),0) as pickups
     from team_activity where activity_date between p_start and p_end
+      and (p_client_id is null or client_id = p_client_id)
   ),
   scalls as (
     select rc.* from reporting_calls rc
@@ -1031,6 +1042,7 @@ AS $function$
     where rc.call_date between p_start and p_end
       and (p_source is null or rc.effective_source = p_source)
       and (p_funnel = 'all' or rf.funnel = p_funnel)
+      and (p_client_id is null or rc.client_id = p_client_id)
   ),
   custf as (
     select c.id, c.contract_value, c.closed_at, rf.funnel,
@@ -1038,12 +1050,19 @@ AS $function$
     from customers c
     left join leads l on l.id=c.lead_id
     left join reporting_funnel rf on rf.id=l.id
+    where (p_client_id is null or c.client_id = p_client_id)
   ),
-  ms as (select customer_count, business_contract_ltv, business_cash_ltv, business_outstanding from reporting_money_summary)
+  ms as (
+    select count(*) as customer_count,
+      coalesce(sum(contract_value),0) as business_contract_ltv,
+      coalesce(sum(cash_collected),0) as business_cash_ltv,
+      coalesce(sum(outstanding),0) as business_outstanding
+    from reporting_money where (p_client_id is null or client_id = p_client_id)
+  )
   select jsonb_build_object(
     'period', jsonb_build_object('start',p_start,'end',p_end,'source',coalesce(p_source,'All sources'),'funnel',p_funnel),
     'outbound', jsonb_build_object(
-      'new_followers', (select coalesce(sum(followers_gained),0) from follower_counts where week_start between p_start and p_end),
+      'new_followers', (select coalesce(sum(followers_gained),0) from follower_counts where week_start between p_start and p_end and p_client_id is null),
       'outreaches', (select outreaches from ta),
       'followups_outreach', (select followups_outreach from ta),
       'replies', (select count(*) from rfc where funnel='outbound' and replied),
@@ -1083,14 +1102,19 @@ AS $function$
       'show_rate', (select case when (select count(*) from rfc where reached_booked and (p_funnel='all' or funnel=p_funnel))>0 then round((select count(*) from scalls where showed)::numeric/(select count(*) from rfc where reached_booked and (p_funnel='all' or funnel=p_funnel))*100,1) end),
       'close_rate', (select case when (select count(*) from scalls where showed)>0 then round((select count(*) from scalls where closed)::numeric/(select count(*) from scalls where showed)*100,1) end),
       'booked_to_close', (select case when (select count(*) from rfc where reached_booked and (p_funnel='all' or funnel=p_funnel))>0 then round((select count(*) from scalls where closed)::numeric/(select count(*) from rfc where reached_booked and (p_funnel='all' or funnel=p_funnel))*100,1) end),
-      'cash_collected', (select coalesce(sum(p.amount),0) from payments p left join customers c on c.id=p.customer_id left join leads l on l.id=c.lead_id left join reporting_funnel rf on rf.id=l.id where p.collected_at::date between p_start and p_end and (p_funnel='all' or rf.funnel=p_funnel)),
+      'cash_collected', (select coalesce(sum(p.amount),0) from payments p where p.collected_at::date between p_start and p_end and (p_client_id is null or p.client_id = p_client_id)),
       'revenue_signed', (select coalesce(sum(contract_value),0) from custf where closed_at::date between p_start and p_end and (p_funnel='all' or funnel=p_funnel)),
       'ltv_cash', (select case when customer_count>0 then round(business_cash_ltv/customer_count,2) else 0 end from ms),
       'ltv_contract', (select case when customer_count>0 then round(business_contract_ltv/customer_count,2) else 0 end from ms),
       'outstanding', (select business_outstanding from ms),
-      'disputes', (select count(*) from disputes d left join customers c on c.id=d.customer_id left join leads l on l.id=c.lead_id left join reporting_funnel rf on rf.id=l.id where coalesce(d.opened_at,d.resolved_at,now())::date between p_start and p_end and (p_funnel='all' or rf.funnel=p_funnel)),
-      'money_lost_to_disputes', (select coalesce(sum(d.amount),0) from disputes d left join customers c on c.id=d.customer_id left join leads l on l.id=c.lead_id left join reporting_funnel rf on rf.id=l.id where d.status='lost' and coalesce(d.opened_at,d.resolved_at,now())::date between p_start and p_end and (p_funnel='all' or rf.funnel=p_funnel)),
-      'dispute_rate', (select case when (select count(*) from custf where closed_at::date between p_start and p_end and (p_funnel='all' or funnel=p_funnel))>0 then round((select count(*) from disputes d left join customers c on c.id=d.customer_id left join leads l on l.id=c.lead_id left join reporting_funnel rf on rf.id=l.id where coalesce(d.opened_at,d.resolved_at,now())::date between p_start and p_end and (p_funnel='all' or rf.funnel=p_funnel))::numeric/(select count(*) from custf where closed_at::date between p_start and p_end and (p_funnel='all' or funnel=p_funnel))*100,1) end)
+      'average_deal_size', (select case when (select count(*) from scalls where closed)>0 then round((select coalesce(sum(contract_value),0) from custf where closed_at::date between p_start and p_end and (p_funnel='all' or funnel=p_funnel))/(select count(*) from scalls where closed)) end),
+      'average_first_payment', null,
+      'cash_per_booked_call', (select case when (select count(*) from rfc where reached_booked and (p_funnel='all' or funnel=p_funnel))>0 then round((select coalesce(sum(p.amount),0) from payments p where p.collected_at::date between p_start and p_end and (p_client_id is null or p.client_id = p_client_id))/(select count(*) from rfc where reached_booked and (p_funnel='all' or funnel=p_funnel))) end),
+      'cash_per_outreach', (select case when (select outreaches from ta)>0 then round((select coalesce(sum(p.amount),0) from payments p where p.collected_at::date between p_start and p_end and (p_client_id is null or p.client_id = p_client_id))/(select outreaches from ta),2) end),
+      'pif_rate', null,
+      'disputes', (select count(*) from disputes d left join customers c on c.id=d.customer_id where coalesce(d.opened_at,d.resolved_at,now())::date between p_start and p_end and (p_client_id is null or c.client_id = p_client_id)),
+      'money_lost_to_disputes', (select coalesce(sum(d.amount),0) from disputes d left join customers c on c.id=d.customer_id where d.status='lost' and coalesce(d.opened_at,d.resolved_at,now())::date between p_start and p_end and (p_client_id is null or c.client_id = p_client_id)),
+      'dispute_rate', (select case when (select count(*) from custf where closed_at::date between p_start and p_end and (p_funnel='all' or funnel=p_funnel))>0 then round((select count(*) from disputes d left join customers c on c.id=d.customer_id where coalesce(d.opened_at,d.resolved_at,now())::date between p_start and p_end and (p_client_id is null or c.client_id = p_client_id))::numeric/(select count(*) from custf where closed_at::date between p_start and p_end and (p_funnel='all' or funnel=p_funnel))*100,1) end)
     ),
     'by_source', (select coalesce(jsonb_agg(jsonb_build_object('source',source,'leads',leads,'booked',booked,'won',won) order by leads desc),'[]'::jsonb)
       from (select channel as source, count(*) leads, count(*) filter (where reached_booked) booked, count(*) filter (where is_won) won from rfc group by channel) s),
@@ -1099,7 +1123,15 @@ AS $function$
               coalesce(sum(c.contract_value),0) signed,
               coalesce(sum((select coalesce(sum(amount),0) from payments p where p.customer_id=c.id)),0) cash
             from customers c left join leads l on l.id=c.lead_id left join reporting_funnel rf on rf.id=l.id
-            where c.closed_at::date between p_start and p_end group by 1) s),
+            where c.closed_at::date between p_start and p_end and (p_client_id is null or c.client_id = p_client_id) group by 1) s),
+    'revenue_by_campaign', '[]'::jsonb,
+    'revenue_by_placement', '[]'::jsonb,
+    'revenue_by_booking_method', (select coalesce(jsonb_agg(jsonb_build_object('method',method,'clients',clients,'signed',signed,'cash',cash) order by cash desc),'[]'::jsonb)
+      from (select coalesce(c.booking_method,'(none)') as method, count(*) clients,
+              coalesce(sum(c.contract_value),0) signed,
+              coalesce(sum((select coalesce(sum(amount),0) from payments p where p.customer_id=c.id)),0) cash
+            from customers c
+            where c.closed_at::date between p_start and p_end and (p_client_id is null or c.client_id = p_client_id) group by 1) s),
     'by_placement', (select coalesce(jsonb_agg(jsonb_build_object('placement',placement,'leads',leads) order by leads desc),'[]'::jsonb)
       from (select coalesce(src_placement,'(none)') as placement, count(*) leads from rfc group by src_placement) s),
     'by_campaign', (select coalesce(jsonb_agg(jsonb_build_object('campaign',campaign,'leads',leads) order by leads desc),'[]'::jsonb)
@@ -1110,8 +1142,26 @@ AS $function$
     'reasons_no_pitch', (select coalesce(jsonb_agg(jsonb_build_object('reason',reason,'name',full_name,'date',call_date) order by call_date desc),'[]'::jsonb) from scalls where outcome='showed_not_pitched' and reason is not null),
     'speed', jsonb_build_object(
       'median_first_reply_seconds', (select round(percentile_cont(0.5) within group (order by t.first_reply_seconds)) from reporting_lead_timing t join rfc on rfc.id=t.lead_id where t.first_reply_seconds is not null),
-      'leads_gone_quiet', (select count(*) from rfc where not is_won and not is_lost and not reached_booked and coalesce(disqualify_reason,'')='' and replied)
-    )
+      'leads_gone_quiet', (select count(*) from rfc where not is_won and not is_lost and not reached_booked and coalesce(disqualify_reason,'')='' and replied),
+      'median_days_lead_to_booked', (select round(percentile_cont(0.5) within group (order by t.days_lead_to_booked)) from reporting_lead_timing t join rfc on rfc.id=t.lead_id where t.days_lead_to_booked is not null),
+      'median_booked_to_call_days', null,
+      'median_sales_cycle_days', null
+    ),
+    'followups', jsonb_build_object(
+      'sent_total', (select count(*) from events where event_type='follow_up_sent' and (p_client_id is null or client_id=p_client_id)),
+      'sent_7d', (select count(*) from events where event_type='follow_up_sent' and created_at > now()-interval '7 days' and (p_client_id is null or client_id=p_client_id)),
+      'sent_30d', (select count(*) from events where event_type='follow_up_sent' and created_at > now()-interval '30 days' and (p_client_id is null or client_id=p_client_id)),
+      'revived_total', (select count(*) from events where event_type='lead_revived' and (p_client_id is null or client_id=p_client_id)),
+      'revived_7d', (select count(*) from events where event_type='lead_revived' and created_at > now()-interval '7 days' and (p_client_id is null or client_id=p_client_id)),
+      'rebooked_total', (select count(distinct r.lead_id) from events r where r.event_type='lead_revived' and (p_client_id is null or r.client_id=p_client_id) and exists (select 1 from events b where b.lead_id=r.lead_id and b.event_type='appointment_booked' and b.created_at > r.created_at))
+    ),
+    'leak', (select coalesce(jsonb_agg(jsonb_build_object('funnel_stage',funnel_stage,'stalled',stalled) order by stalled desc),'[]'::jsonb)
+      from (select funnel_stage, count(*)::int stalled from leads
+            where status='engaged' and funnel_stage is not null and last_message_at < now()-interval '24 hours'
+              and (p_client_id is null or client_id=p_client_id)
+            group by funnel_stage) s),
+    'ai_cash', (select coalesce(sum(p.amount),0) from payments p join customers c on c.id=p.customer_id where c.booking_method='ai_dm' and (p_client_id is null or c.client_id=p_client_id)),
+    'ai_signed', (select coalesce(sum(contract_value),0) from customers c where c.booking_method='ai_dm' and (p_client_id is null or c.client_id=p_client_id))
   )
 $function$;
 
