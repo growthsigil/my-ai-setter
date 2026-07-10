@@ -39,7 +39,6 @@ import {
 } from "./supabase";
 import {
   addContactTags,
-  removeContactTags,
   deleteContact,
   fetchContactThread,
   type ThreadMessage,
@@ -535,22 +534,26 @@ export async function runOngoingTagging(params: {
     const disqualify = String(out.disqualify || "none").toLowerCase();
     const reason = String(out.reason || "").slice(0, 300);
 
-    // biz_owner takes precedence: established online business => handoff (NOT a
-    // disqualify; we never set disqualify_reason for owners).
+    // biz_owner is a SOFT signal only — it must NEVER auto-pause the AI or hand
+    // off unconditionally. In practice this classifier fires on any generic
+    // "I own a business" answer (e.g. a lead who tunes cars for a living,
+    // answering "what do you do for work"), which is not itself a disqualifying
+    // or handoff-worthy signal for a coaching offer — same false-positive shape
+    // as the "financial" verdict below. Tag it for visibility and log it so the
+    // operator can see it, but the AI keeps running the funnel normally; nothing
+    // here pauses the lead or pings anyone.
     if (bizOwner) {
-      await removeContactTags(client.ghl_api_key!, lead.ghl_contact_id!, [
-        TAG_ICP,
-        TAG_QUALIFIED,
-      ]);
-      await addContactTags(client.ghl_api_key!, lead.ghl_contact_id!, [TAG_BIZ_OWNER]);
-      await pauseLead({ client, lead, notify: { label: "Take over - established biz owner", reason } });
-      await logEvent({
-        client_id: client.id,
-        lead_id: lead.id,
-        event_type: "handoff_biz_owner",
-        metadata: { reason },
-      });
-      return;
+      const already = await eventExists(lead.id, "biz_owner_signal");
+      if (!already) {
+        await addContactTags(client.ghl_api_key!, lead.ghl_contact_id!, [TAG_BIZ_OWNER]);
+        await logEvent({
+          client_id: client.id,
+          lead_id: lead.id,
+          event_type: "biz_owner_signal",
+          metadata: { reason, note: "informational only - AI not paused, no auto-handoff" },
+        });
+      }
+      // Fall through — no return, no pause, no tag stripping. The funnel keeps going.
     }
 
     // The screener NEVER financially disqualifies. Investment/budget is owned
