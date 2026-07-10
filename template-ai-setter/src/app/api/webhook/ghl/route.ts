@@ -68,6 +68,7 @@ import {
   getFreeSlots,
   updateContactEmail,
   deleteContact,
+  getLatestInboundText,
 } from "@/lib/ghl";
 import { findActiveBan } from "@/lib/bans";
 import { resolveIncomingMedia } from "@/lib/media";
@@ -530,12 +531,31 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, skipped: "banned", client: client.slug });
   }
 
-  // --- 5. Resolve media messages (voice notes / images) into text. ---
-  // IG sends these as "type 18" with an empty body and no media URL, so we call
-  // the GHL API to fetch the attachment, then transcribe audio (Groq) or
-  // describe images (Claude vision). The result is stored and flows through the
-  // pipeline as if the lead had typed it. Text messages skip this entirely.
+  // --- 5. Recover content when the webhook payload has an empty/non-real body. ---
   let effectiveText = messageText;
+
+  // 5a. Text recovery. IG bursts (e.g. a photo sent together with a keyword
+  // like "MACROS") can make GHL fire the inbound workflow on the empty-body
+  // MEDIA event, dropping the lead's actual text. Pull the newest inbound
+  // message's text straight from the conversation so those DMs still get a
+  // reply. Only acts on the single newest inbound, so it can't resurface an
+  // older, already-handled message. Text messages skip this entirely.
+  if (!hasRealText(effectiveText)) {
+    try {
+      const recovered = await getLatestInboundText(client.ghl_api_key, locationId, leadKey);
+      if (recovered) {
+        effectiveText = recovered;
+        console.log("[webhook] recovered inbound text:", recovered.substring(0, 80));
+      }
+    } catch (err) {
+      console.error("[webhook] inbound text recovery failed:", err);
+    }
+  }
+
+  // 5b. Media resolution. Genuine voice notes / images arrive as "type 18" with
+  // an empty body and no media URL, so we call the GHL API to fetch the
+  // attachment, then transcribe audio (Groq) or describe images (Claude
+  // vision). The result flows through the pipeline as if the lead had typed it.
   if (!hasRealText(effectiveText)) {
     try {
       const resolved = await resolveIncomingMedia({
