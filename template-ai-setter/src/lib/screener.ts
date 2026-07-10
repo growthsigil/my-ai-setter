@@ -489,19 +489,24 @@ export function buildOngoingSystemPrompt(client: Client): string {
 
   return `You are a lightweight classifier for an Instagram DM setter. A lead is in an ongoing conversation. Read the WHOLE conversation and decide the fields below. Be CONSERVATIVE — default to the non-committal value. NEVER decide anything off a greeting, a single location, or one trivial reply.
 
+The operator's own criteria (what this business offers, who it is for, and what a good lead looks like) are in <criteria> below. Judge INTENT and FIT against THOSE criteria — do NOT assume any particular industry, and do NOT invent a definition of your own.
+
 Return ONLY strict minified JSON, nothing else, no prose, no code fences:
 {"qualified":bool,"icp":bool,"biz_owner":bool,"disqualify":"none|financial|no_intent","reason":"<one line>"}
 
 - "qualified" (HARD GATE — both must be clearly confirmed in the conversation):
-   (1) INTENT: the lead clearly wants to make money online / start or grow online income, AND
+   (1) INTENT: the lead clearly wants the outcome this business helps with (per <criteria>), AND
    (2) MONEY: the lead has the financial capacity to invest (can afford to pay for help, has income/savings/funds).
    If EITHER is missing or only implied, qualified=false. Never qualified from a greeting, a location, or one trivial answer.
-- "icp": a SOFTER "looks like a fit". TRUE when there is REAL signal they fit (clearly wants online income / right profile), even before money is confirmed. Still NEVER true at hello or from a bare greeting/location.
-- "biz_owner": TRUE only if it is clear they ALREADY run an established online business at roughly $3k+/month.
-- "disqualify": set "financial" ONLY if they clearly state they have no money / cannot invest anything; set "no_intent" ONLY if they clearly do NOT want to make money online (not interested in income at all). Otherwise "none". Be very conservative — do not disqualify off thin or early threads. (Friends/family are handled elsewhere — do not use disqualify for them. Business owners are handed off, never disqualified.)
+- "icp": a SOFTER "looks like a fit". TRUE when there is REAL signal they fit the operator's criteria, even before money is confirmed. Still NEVER true at hello or from a bare greeting/location.
+- "biz_owner": TRUE only if the operator's criteria treat an already-established business as a handoff/exclusion AND it is clear the lead already matches that profile (e.g. runs an established online business at roughly $3k+/month). Otherwise false.
+- "disqualify": choose "none" unless ONE of these is UNMISTAKABLE from the lead's OWN words:
+   - "financial": the lead has EXPLICITLY said they have no money / cannot invest anything at all in this. A budget that is simply unconfirmed — or the lead being young, a student, low-income, or outside the target age/demographic — is NEVER a financial disqualify. Those leads must still be qualified by ASKING about their investment capacity, never dropped. Do NOT infer "no money" from age, job, location, or silence.
+   - "no_intent": the lead has clearly said they do NOT want the outcome this business offers (not interested at all).
+   Otherwise "none". Be very conservative — do not disqualify off thin or early threads, and NEVER disqualify anyone on age or demographic grounds. (Friends/family are handled elsewhere — do not use disqualify for them. Business owners are handed off, never disqualified.)
 - "reason": one short line.
 
-Operator's qualification context (supporting signal only — the intent+money gate above is mandatory):
+Operator's qualification context (defines INTENT, FIT, and who this is for — the money gate above is mandatory):
 <criteria>
 ${criteria || "(no explicit criteria provided)"}
 </criteria>`;
@@ -548,9 +553,16 @@ export async function runOngoingTagging(params: {
       return;
     }
 
-    // Phase 6: clear financial / no-intent disqualify => record reason, tag,
-    // pause, log (once). Conservative classifier guards against false positives.
-    if (disqualify === "financial" || disqualify === "no_intent") {
+    // The screener NEVER financially disqualifies. Investment/budget is owned
+    // entirely by the funnel's `qualify_fit` stage, whose disqualify_when is the
+    // single source of truth (e.g. "under-22 OR non-USA -> ask investment; only
+    // DQ when they make clear they can't invest anything at all"). This is a hard
+    // guarantee: a young / off-demographic / budget-unconfirmed lead can never be
+    // auto-paused here on a shaky financial read from the classifier — they get
+    // asked about their investment capacity by the funnel instead of being dropped.
+    // So a "financial" verdict is intentionally ignored (it falls through and the
+    // AI stays engaged); only a clear "not interested at all" (no_intent) acts.
+    if (disqualify === "no_intent") {
       const already = await eventExists(lead.id, "lead_disqualified");
       if (!already) {
         await setDisqualifyReason(lead.id, disqualify);
